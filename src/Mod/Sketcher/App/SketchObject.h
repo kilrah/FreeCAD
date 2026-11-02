@@ -106,6 +106,9 @@ public:
     App::PropertyBool FullyConstrained;
     App::PropertyPrecision ArcFitTolerance;
     Part::PropertyPartShape InternalShape;
+    /// Construction geometry (edges and points), in sketch-local coordinates. Exposed under the
+    /// "Construction" element prefix so that it can be used as external geometry.
+    Part::PropertyPartShape ConstructionShape;
     App::PropertyPrecision InternalTolerance;
     App::PropertyBool MakeInternals;
     // Internal-face pipeline: 1 = legacy FaceMakerRing (<= 1.1), 2 = FaceMakerBuildFace.
@@ -917,6 +920,13 @@ public:
 
     static const std::string& internalPrefix();
     static const char* convertInternalName(const char* name);
+
+    static const std::string& constructionPrefix();
+    /// Returns the part of name following the construction prefix, or nullptr if there is none
+    static const char* convertConstructionName(const char* name);
+    /// Returns the sub shape of ConstructionShape for the given "Construction..." element, with the
+    /// sketch Placement applied (i.e. in global coordinates). Null if it cannot be resolved.
+    Part::TopoShape getConstructionSubShape(const char* element) const;
 
     std::string convertSubName(const Data::IndexedName&, bool postfix = true) const;
 

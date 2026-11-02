@@ -224,6 +224,8 @@ SketchObject::SketchObject() : geoLastId(0)
                       "Tolerance for fitting arcs of projected external geometry");
     ADD_PROPERTY(InternalShape,
                  (Part::TopoShape()));
+    ADD_PROPERTY(ConstructionShape,
+                 (Part::TopoShape()));
     ADD_PROPERTY_TYPE(MakeInternals,
                       (false),
                       "Internal Geometry",
@@ -272,6 +274,7 @@ SketchObject::SketchObject() : geoLastId(0)
     managedoperation = false;
 
     registerElementCache(internalPrefix(), &InternalShape);
+    registerElementCache(constructionPrefix(), &ConstructionShape);
 }
 
 SketchObject::~SketchObject() {
@@ -396,9 +399,10 @@ void SketchObject::buildShape()
 
     std::vector<Part::TopoShape> shapes;
     std::vector<Part::TopoShape> vertices;
+    std::vector<Part::TopoShape> constructionShapes;
     int geoId = 0;
 
-    auto addVertex = [&vertices](auto vertex, auto name) {
+    auto addVertex = [](auto& list, auto vertex, auto name) {
         if (!vertex.hasElementMap()) {
             vertex.resetElementMap(std::make_shared<Data::ElementMap>());
         }
@@ -407,13 +411,13 @@ void SketchObject::buildShape()
             Data::MappedName::fromRawData(name.c_str()),
             0L
         );
-        vertices.push_back(vertex);
-        vertices.back().copyElementMap(vertex, Part::OpCodes::Sketch);
+        list.push_back(vertex);
+        list.back().copyElementMap(vertex, Part::OpCodes::Sketch);
     };
 
-    auto addEdge = [this, &shapes](auto geo, auto indexedName) {
-        shapes.push_back(getEdge(geo, convertSubName(indexedName, false).c_str()));
-        if (checkSmallEdge(shapes.back())) {
+    auto addEdge = [this](auto& list, auto geo, auto indexedName) {
+        list.push_back(getEdge(geo, convertSubName(indexedName, false).c_str()));
+        if (checkSmallEdge(list.back())) {
             FC_WARN("Edge too small: " << indexedName);
         }
     };
@@ -422,19 +426,22 @@ void SketchObject::buildShape()
     auto geometries = solvedSketch.extractGeometry();
     for (auto geo : geometries) {
         ++geoId;
-        if (GeometryFacade::getConstruction(geo)) {
-            continue;
-        }
+        // construction geometry is not part of Shape, but is exposed separately in
+        // ConstructionShape
+        const bool construction = GeometryFacade::getConstruction(geo);
+        auto& edgeList = construction ? constructionShapes : shapes;
+        auto& vertexList = construction ? constructionShapes : vertices;
         if (geo->isDerivedFrom<Part::GeomPoint>()) {
             int idx = getVertexIndexGeoPos(geoId - 1, Sketcher::PointPos::start);
             addVertex(
+                vertexList,
                 Part::TopoShape {TopoDS::Vertex(geo->toShape())},
                 convertSubName(Data::IndexedName::fromConst("Vertex", idx + 1), false)
             );
         }
         else {
             auto indexedName = Data::IndexedName::fromConst("Edge", geoId);
-            addEdge(geo, indexedName);
+            addEdge(edgeList, geo, indexedName);
         }
     }
 
@@ -453,16 +460,28 @@ void SketchObject::buildShape()
 
         if (geo->isDerivedFrom<Part::GeomPoint>()) {
             addVertex(
+                vertices,
                 Part::TopoShape {TopoDS::Vertex(geo->toShape())},
                 convertSubName(indexedName, false)
             );
         }
         else {
-            addEdge(geo, indexedName);
+            addEdge(shapes, geo, indexedName);
         }
     }
 
     internalElementMap.clear();
+
+    // Must be set before Shape, see below
+    if (constructionShapes.empty()) {
+        ConstructionShape.setValue(Part::TopoShape());
+    }
+    else {
+        Part::TopoShape construction(0, getDocument()->getStringHasher());
+        construction.makeElementCompound(constructionShapes, Part::OpCodes::Sketch);
+        construction.Tag = getID();
+        ConstructionShape.setValue(construction.located(TopLoc_Location()));
+    }
 
     if (shapes.empty() && vertices.empty()) {
         InternalShape.setValue(Part::TopoShape());
@@ -1718,6 +1737,13 @@ App::DocumentObject *SketchObject::getSubObject(
         if (subshape.isNull())
             return nullptr;
     }
+    else if (auto constructionType = convertConstructionName(indexedName.getType())) {
+        auto shapeType = Part::TopoShape::shapeType(constructionType, true);
+        if (shapeType != TopAbs_SHAPE)
+            subshape = ConstructionShape.getShape().getSubTopoShape(shapeType, indexedName.getIndex(), true);
+        if (subshape.isNull())
+            return nullptr;
+    }
     else if (!pyObj || !mapped) {
         if (!pyObj
             || (index > 0
@@ -1879,6 +1905,8 @@ std::vector<const char *> SketchObject::getElementTypes(bool all) const
                 "InternalEdge",
                 "InternalFace",
                 "InternalVertex",
+                "ConstructionEdge",
+                "ConstructionVertex",
               };
     return res;
 }
@@ -1920,30 +1948,90 @@ const char *SketchObject::convertInternalName(const char *name)
     return nullptr;
 }
 
+const std::string &SketchObject::constructionPrefix()
+{
+    static std::string _prefix("Construction");
+    return _prefix;
+}
+
+const char *SketchObject::convertConstructionName(const char *name)
+{
+    if (name && boost::starts_with(name, constructionPrefix()))
+        return name + constructionPrefix().size();
+    return nullptr;
+}
+
+Part::TopoShape SketchObject::getConstructionSubShape(const char *element) const
+{
+    element = Data::findElementName(element);
+    const auto& constructionShape = ConstructionShape.getShape();
+    if (!element || constructionShape.isNull())
+        return {};
+
+    Part::TopoShape sub;
+    if (auto realName = convertConstructionName(element)) {
+        sub = constructionShape.getSubTopoShape(realName, true);
+    }
+    else if (Data::isMappedElement(element)) {
+        // mapped names of construction elements are regular geometry names, so only those that
+        // are present in ConstructionShape refer to construction geometry
+        auto mappedElement = constructionShape.getElementName(element);
+        if (mappedElement.index)
+            sub = constructionShape.getSubTopoShape(mappedElement.index.toString().c_str(), true);
+    }
+    if (!sub.isNull())
+        sub.transformShape(Placement.getValue().toMatrix(), false, true);
+    return sub;
+}
+
 App::ElementNamePair SketchObject::getElementName(
         const char *name, ElementNameType type) const
 {
     App::ElementNamePair ret;
     if(!name) return ret;
 
-    if(hasSketchMarker(name))
-        return Part2DObject::getElementName(name,type);
-
     const char *mapped = Data::isMappedElement(name);
-    Data::IndexedName index = checkSubName(name);
-    index.appendToStringBuffer(ret.oldName);
-    if (auto realName = convertInternalName(ret.oldName.c_str())) {
+
+    // The mapped name of a construction element is a regular sketch geometry name (e.g. g2 with the
+    // sketch marker), which would otherwise be resolved against Shape (which has no construction
+    // geometry) or by checkSubName() to a plain Edge/Vertex index. Check ConstructionShape first.
+    bool isConstruction = false;
+    if (mapped && !ConstructionShape.getShape().isNull()) {
+        auto constructionElement = ConstructionShape.getShape().getElementName(name);
+        if (constructionElement.index && constructionElement.name) {
+            ret.oldName = constructionPrefix();
+            constructionElement.index.appendToStringBuffer(ret.oldName);
+            isConstruction = true;
+        }
+    }
+
+    Data::IndexedName index;
+    if (!isConstruction) {
+        if(hasSketchMarker(name))
+            return Part2DObject::getElementName(name,type);
+
+        index = checkSubName(name);
+        index.appendToStringBuffer(ret.oldName);
+        // Elements of InternalShape and ConstructionShape are exposed with a prefix
+        isConstruction = convertConstructionName(ret.oldName.c_str()) != nullptr;
+    }
+    const char* realName = isConstruction ? convertConstructionName(ret.oldName.c_str())
+                                          : convertInternalName(ret.oldName.c_str());
+    if (realName) {
+        const std::string& prefix = isConstruction ? constructionPrefix() : internalPrefix();
+        const Part::TopoShape& prefixedShape =
+            isConstruction ? ConstructionShape.getShape() : InternalShape.getShape();
         Data::MappedElement mappedElement;
         if (mapped)
-            mappedElement = InternalShape.getShape().getElementName(name);
+            mappedElement = prefixedShape.getElementName(name);
         else if (type == ElementNameType::Export)
-            ret.newName = getExportElementName(InternalShape.getShape(), realName).newName;
+            ret.newName = getExportElementName(prefixedShape, realName).newName;
         else
-            mappedElement = InternalShape.getShape().getElementName(realName);
+            mappedElement = prefixedShape.getElementName(realName);
 
         if (mapped || type != ElementNameType::Export) {
             if (mappedElement.index) {
-                ret.oldName = internalPrefix();
+                ret.oldName = prefix;
                 mappedElement.index.appendToStringBuffer(ret.oldName);
             }
             if (mappedElement.name) {
@@ -2000,6 +2088,9 @@ Data::IndexedName SketchObject::checkSubName(const char *subname) const
         "InternalEdge",
         "InternalFace",
         "InternalVertex",
+
+        "ConstructionEdge",
+        "ConstructionVertex",
     };
 
     if(!subname) return Data::IndexedName();
@@ -2104,8 +2195,12 @@ std::string SketchObject::convertSubName(const char *subname, bool postfix) cons
 
 std::string SketchObject::convertSubName(const Data::IndexedName &indexedName, bool postfix) const {
     std::ostringstream ss;
-    if (auto realType = convertInternalName(indexedName.getType())) {
-        auto mapped = InternalShape.getShape().getMappedName(
+    const char* constructionType = convertConstructionName(indexedName.getType());
+    if (auto realType = constructionType ? constructionType
+                                          : convertInternalName(indexedName.getType())) {
+        const auto& prefixedShape = constructionType ? ConstructionShape.getShape()
+                                                     : InternalShape.getShape();
+        auto mapped = prefixedShape.getMappedName(
                 Data::IndexedName::fromConst(realType, indexedName.getIndex()));
         if (!mapped) {
             if (postfix)

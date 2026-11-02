@@ -114,7 +114,9 @@ public:
         std::string element(sSubName);
         if ((element.size() > 4 && element.substr(0, 4) == "Edge")
             || (element.size() > 6 && element.substr(0, 6) == "Vertex")
-            || (element.size() > 4 && element.substr(0, 4) == "Face")) {
+            || (element.size() > 4 && element.substr(0, 4) == "Face")
+            || (element.size() > 16 && element.substr(0, 16) == "ConstructionEdge")
+            || (element.size() > 18 && element.substr(0, 18) == "ConstructionVertex")) {
             return true;
         }
 
@@ -176,7 +178,9 @@ public:
                 || obj->isDerivedFrom<App::Line>() || obj->isDerivedFrom<App::Point>()
                 || (subName.size() > 4 && subName.substr(0, 4) == "Edge")
                 || (subName.size() > 6 && subName.substr(0, 6) == "Vertex")
-                || (subName.size() > 4 && subName.substr(0, 4) == "Face")) {
+                || (subName.size() > 4 && subName.substr(0, 4) == "Face")
+                || (subName.size() > 16 && subName.substr(0, 16) == "ConstructionEdge")
+                || (subName.size() > 18 && subName.substr(0, 18) == "ConstructionVertex")) {
                 try {
                     openCommand(QT_TRANSLATE_NOOP("Command", "Add external geometry"));
                     Gui::cmdAppObjectArgs(

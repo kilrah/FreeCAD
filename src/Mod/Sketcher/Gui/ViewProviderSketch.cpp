@@ -30,11 +30,13 @@
 #include <Inventor/SoPickedPoint.h>
 #include <Inventor/actions/SoRayPickAction.h>
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
+#include <Inventor/details/SoLineDetail.h>
 #include <Inventor/details/SoPointDetail.h>
 #include <Inventor/events/SoKeyboardEvent.h>
 #include <Inventor/lists/SoPickedPointList.h>
 #include <Inventor/nodes/SoCamera.h>
 #include <Inventor/nodes/SoDrawStyle.h>
+#include <Inventor/nodes/SoLightModel.h>
 #include <Inventor/nodes/SoShapeHints.h>
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoTransform.h>
@@ -60,7 +62,6 @@
 #include <Base/Console.h>
 #include <Base/Converter.h>
 #include <Base/ServiceProvider.h>
-#include <Base/Tools.h>
 #include <Base/Vector3D.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
@@ -98,11 +99,6 @@
 #include "Workbench.h"
 
 #include <BRep_Builder.hxx>
-#include <BRepAdaptor_Curve.hxx>
-#include <BRepBndLib.hxx>
-#include <Bnd_Box.hxx>
-#include <GCPnts_TangentialDeflection.hxx>
-#include <TopoDS.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <Precision.hxx>
 #include <TopExp.hxx>
@@ -111,6 +107,7 @@
 #include <TopTools_ListOfListOfShape.hxx>
 
 #include <Mod/Part/App/Tools.h>
+#include <Mod/Part/Gui/SoBrepEdgeSet.h>
 #include <Mod/Part/Gui/SoFCShapeObject.h>
 
 
@@ -597,8 +594,7 @@ ViewProviderSketch::ViewProviderSketch()
     , pcSketchFacesToggle(new SoToggleSwitch)
     , pcConstructionToggle(new SoToggleSwitch)
     , pcConstructionColor(new SoBaseColor)
-    , pcConstructionCoords(new SoCoordinate3)
-    , pcConstructionLines(new SoLineSet)
+    , pcConstructionShape(new PartGui::SoFCShape)
     , listener(nullptr)
     , editCoinManager(nullptr)
     , snapManager(nullptr)
@@ -719,69 +715,49 @@ ViewProviderSketch::ViewProviderSketch()
 
     pcSketchFacesToggle->addChild(pcSketchFaces);
 
+    // Construction geometry: dashed lines, unlit, in the sketch line color
     auto* constructionDrawStyle = new SoDrawStyle;
     constructionDrawStyle->linePattern = 0x7E7E;
+    constructionDrawStyle->pointSize = PointSize.getValue();
+    auto* constructionLightModel = new SoLightModel;
+    constructionLightModel->model = SoLightModel::BASE_COLOR;
+    pcConstructionShape->addChild(constructionDrawStyle);
+    pcConstructionShape->addChild(constructionLightModel);
+    pcConstructionShape->addChild(pcConstructionColor);
+    pcConstructionShape->addChild(pcConstructionShape->coords);
+    pcConstructionShape->addChild(pcConstructionShape->lineset);
+    pcConstructionShape->addChild(pcConstructionShape->nodeset);
     pcConstructionToggle->on = false;
-    pcConstructionToggle->addChild(constructionDrawStyle);
-    pcConstructionToggle->addChild(pcConstructionColor);
-    pcConstructionToggle->addChild(pcConstructionCoords);
-    pcConstructionToggle->addChild(pcConstructionLines);
+    pcConstructionToggle->addChild(pcConstructionShape);
 }
 
 void ViewProviderSketch::updateConstructionGeometry(bool editing)
 {
-    std::vector<SbVec3f> points;
-    std::vector<int32_t> counts;
-
+    // In edit mode construction geometry is drawn by the EditModeCoinManager
     auto* sketch = getSketchObject();
-    if (ShowConstruction.getValue() && !editing && sketch) {
-        std::vector<TopoDS_Edge> edges;
-        Bnd_Box bounds;
-        for (const auto* geo : sketch->getInternalGeometry()) {
-            if (!geo || !GeometryFacade::getConstruction(geo) || geo->isDerivedFrom<Part::GeomPoint>()) {
-                continue;
-            }
-            TopoDS_Shape shape = geo->toShape();
-            if (shape.IsNull() || shape.ShapeType() != TopAbs_EDGE) {
-                continue;
-            }
-            BRepBndLib::Add(shape, bounds);
-            edges.push_back(TopoDS::Edge(shape));
-        }
+    const bool show = ShowConstruction.getValue() && Visibility.getValue() && !editing && sketch;
 
-        // Same tessellation settings as the regular shape rendering (Part preferences
-        // MeshDeviation / MeshAngularDeflection, as held by the Deviation and AngularDeflection
-        // properties), so curves look the same as in the rest of the 3D view.
-        double deviation = Precision::Confusion();
-        if (!bounds.IsVoid()) {
-            deviation = std::max(Part::Tools::getDeflection(bounds, Deviation.getValue()), deviation);
-        }
-        const double angular = Base::toRadians(AngularDeflection.getValue());
-
-        for (const auto& edge : edges) {
-            BRepAdaptor_Curve curve(edge);
-            GCPnts_TangentialDeflection discretizer(curve, angular, deviation);
-            const int nbPoints = discretizer.NbPoints();
-            if (nbPoints < 2) {
-                continue;
-            }
-            for (int i = 1; i <= nbPoints; ++i) {
-                gp_Pnt p = discretizer.Value(i);
-                points.emplace_back(float(p.X()), float(p.Y()), float(p.Z()));
-            }
-            counts.push_back(nbPoints);
-        }
+    TopoDS_Shape shape;
+    if (show) {
+        shape = sketch->ConstructionShape.getValue();
     }
 
-    pcConstructionCoords->point.setValues(0, int(points.size()), points.data());
-    pcConstructionCoords->point.setNum(int(points.size()));
-    pcConstructionLines->numVertices.setValues(0, int(counts.size()), counts.data());
-    pcConstructionLines->numVertices.setNum(int(counts.size()));
+    // Same tessellation settings as the regular shape rendering, so curves look the same as in
+    // the rest of the 3D view.
+    try {
+        ViewProviderPartExt::setupCoinGeometry(
+            shape,
+            pcConstructionShape,
+            Deviation.getValue(),
+            AngularDeflection.getValue()
+        );
+    }
+    catch (const Standard_Failure& e) {
+        FC_ERR("Cannot compute construction geometry representation: " << e.GetMessageString());
+    }
 
     pcConstructionColor->rgb.setValue(Base::convertTo<SbColor>(LineColor.getValue()));
-    // In edit mode construction geometry is drawn by the EditModeCoinManager
-    pcConstructionToggle->on =
-        ShowConstruction.getValue() && Visibility.getValue() && !editing && !points.empty();
+    pcConstructionToggle->on = show && !Part::Tools::isShapeEmpty(shape);
 }
 
 ViewProviderSketch::~ViewProviderSketch()
@@ -3961,7 +3937,7 @@ void ViewProviderSketch::updateData(const App::Property* prop) {
                 AngularDeflection.getValue());
     }
 
-    if (prop == &getSketchObject()->Geometry || prop == &getSketchObject()->InternalShape) {
+    if (prop == &getSketchObject()->ConstructionShape) {
         updateConstructionGeometry(isInEditMode());
     }
 
@@ -4125,6 +4101,31 @@ void SketcherGui::ViewProviderSketch::finishRestoring()
 // clang-format on
 bool ViewProviderSketch::getElementPicked(const SoPickedPoint* pp, std::string& subname) const
 {
+    if (pp->getPath()->containsNode(pcConstructionShape) && !isInEditMode()) {
+        const SoDetail* detail = pp->getDetail();
+        std::string element;
+        if (detail && detail->getTypeId() == SoLineDetail::getClassTypeId()) {
+            const auto* lineDetail = static_cast<const SoLineDetail*>(detail);
+            int edge = lineDetail->getPartIndex();
+            if (edge < 1) {
+                edge = pcConstructionShape->lineset->edgeIndexFromLine(lineDetail->getLineIndex());
+            }
+            if (edge >= 1) {
+                element = "Edge" + std::to_string(edge);
+            }
+        }
+        else if (detail && detail->getTypeId() == SoPointDetail::getClassTypeId()) {
+            const auto* pointDetail = static_cast<const SoPointDetail*>(detail);
+            int vertex = pointDetail->getCoordinateIndex()
+                - pcConstructionShape->nodeset->startIndex.getValue() + 1;
+            element = "Vertex" + std::to_string(vertex);
+        }
+        if (!element.empty()) {
+            subname = SketchObject::constructionPrefix() + element;
+            return true;
+        }
+    }
+
     if (pp->getPath()->containsNode(pcSketchFaces) && !isInEditMode()) {
         if (ViewProvider2DObject::getElementPicked(pp, subname)) {
             subname = SketchObject::internalPrefix() + subname;
@@ -4212,6 +4213,41 @@ bool ViewProviderSketch::getDetailPath(
 
     if (!isInEditMode() && subname) {
         const char* realName = getLastPartOfName(subname);
+
+        if (const char* constructionName = SketchObject::convertConstructionName(realName)) {
+            auto type = Part::TopoShape::getElementTypeAndIndex(constructionName);
+            auto len = pPath->getLength();
+            if (append) {
+                pPath->append(pcRoot);
+                pPath->append(pcAnnotation);
+                pPath->append(pcConstructionToggle);
+            }
+            pPath->append(pcConstructionShape);
+
+            if (type.first == "Edge") {
+                const int line = pcConstructionShape->lineset->lineIndexFromEdge(type.second);
+                if (line == PartGui::SoBrepEdgeSet::InvalidLine) {
+                    pPath->truncate(len);
+                    return false;
+                }
+                auto* lineDetail = new SoLineDetail();
+                lineDetail->setLineIndex(line);
+                lineDetail->setPartIndex(type.second);
+                det = lineDetail;
+            }
+            else if (type.first == "Vertex") {
+                auto* pointDetail = new SoPointDetail();
+                pointDetail->setCoordinateIndex(
+                    type.second + pcConstructionShape->nodeset->startIndex.getValue() - 1
+                );
+                det = pointDetail;
+            }
+            else {
+                pPath->truncate(len);
+                return false;
+            }
+            return true;
+        }
 
         realName = SketchObject::convertInternalName(realName);
         if (realName) {

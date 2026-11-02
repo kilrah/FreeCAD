@@ -28,8 +28,6 @@
 
 #include <Inventor/SoRenderManager.h>
 #include <Inventor/nodes/SoBaseColor.h>
-#include <Inventor/nodes/SoCoordinate3.h>
-#include <Inventor/nodes/SoLineSet.h>
 #include <Inventor/lists/SoPickedPointList.h>
 #include <Inventor/sensors/SoNodeSensor.h>
 #include <QCoreApplication>
@@ -1075,11 +1073,10 @@ private:
     Gui::CoinPtr<SoSketchFaces> pcSketchFaces;
     Gui::CoinPtr<SoToggleSwitch> pcSketchFacesToggle;
 
-    /// Visual-only rendering of construction geometry outside of edit mode
+    /// Rendering of the sketch ConstructionShape outside of edit mode (see ShowConstruction)
     Gui::CoinPtr<SoToggleSwitch> pcConstructionToggle;
     Gui::CoinPtr<SoBaseColor> pcConstructionColor;
-    Gui::CoinPtr<SoCoordinate3> pcConstructionCoords;
-    Gui::CoinPtr<SoLineSet> pcConstructionLines;
+    Gui::CoinPtr<PartGui::SoFCShape> pcConstructionShape;
 
     void updateConstructionGeometry(bool editing);
 

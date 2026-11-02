@@ -101,6 +101,22 @@ using namespace Base;
 
 FC_LOG_LEVEL_INIT("Sketch", true, true)
 
+namespace {
+/// Returns the referenced sub shape of an external geometry link to a Part::Feature. Construction
+/// geometry of another sketch is not part of its Shape, so it is looked up in its
+/// ConstructionShape first. Throws like TopoShape::getSubShape() if the element is not found.
+TopoDS_Shape getExternalSubShape(const Part::Feature* refObj, const std::string& subElement)
+{
+    if (auto* refSketch = freecad_cast<const SketchObject*>(refObj)) {
+        TopoDS_Shape shape = refSketch->getConstructionSubShape(subElement.c_str()).getShape();
+        if (!shape.IsNull()) {
+            return shape;
+        }
+    }
+    return refObj->Shape.getShape().getSubShape(subElement.c_str());
+}
+}  // namespace
+
 void SketchObject::initExternalGeo() {
     std::vector<Part::Geometry *> geos;
     auto HLine = GeometryTypedFacade<Part::GeomLineSegment>::getTypedFacade();
@@ -1345,8 +1361,7 @@ void SketchObject::validateExternalLinks()
             }
             else {
                 const auto* refObj = static_cast<const Part::Feature*>(Obj);
-                const Part::TopoShape& refShape = refObj->Shape.getShape();
-                refSubShape = refShape.getSubShape(SubElement.c_str());
+                refSubShape = getExternalSubShape(refObj, SubElement);
             }
             continue; // no bad link needs to be removed
         }
@@ -2480,8 +2495,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 refSubShape = datum->getShape();
             }
             else if (auto* refObj = freecad_cast<const Part::Feature*>(resolvedObj)) {
-                const Part::TopoShape& refShape = refObj->Shape.getShape();
-                refSubShape = refShape.getSubShape(SubElement.c_str());
+                refSubShape = getExternalSubShape(refObj, SubElement);
             }
             else if (auto* pl = freecad_cast<const App::Plane*>(resolvedObj)) {
                 Base::Vector3d base = pl->getBasePoint();
