@@ -34,6 +34,7 @@
 #include <Inventor/events/SoKeyboardEvent.h>
 #include <Inventor/lists/SoPickedPointList.h>
 #include <Inventor/nodes/SoCamera.h>
+#include <Inventor/nodes/SoDrawStyle.h>
 #include <Inventor/nodes/SoShapeHints.h>
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoTransform.h>
@@ -59,6 +60,7 @@
 #include <Base/Console.h>
 #include <Base/Converter.h>
 #include <Base/ServiceProvider.h>
+#include <Base/Tools.h>
 #include <Base/Vector3D.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
@@ -96,6 +98,11 @@
 #include "Workbench.h"
 
 #include <BRep_Builder.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
+#include <GCPnts_TangentialDeflection.hxx>
+#include <TopoDS.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <Precision.hxx>
 #include <TopExp.hxx>
@@ -103,6 +110,7 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfListOfShape.hxx>
 
+#include <Mod/Part/App/Tools.h>
 #include <Mod/Part/Gui/SoFCShapeObject.h>
 
 
@@ -587,6 +595,10 @@ ViewProviderSketch::ViewProviderSketch()
     , Mode(STATUS_NONE)
     , pcSketchFaces(new SoSketchFaces)
     , pcSketchFacesToggle(new SoToggleSwitch)
+    , pcConstructionToggle(new SoToggleSwitch)
+    , pcConstructionColor(new SoBaseColor)
+    , pcConstructionCoords(new SoCoordinate3)
+    , pcConstructionLines(new SoLineSet)
     , listener(nullptr)
     , editCoinManager(nullptr)
     , snapManager(nullptr)
@@ -662,6 +674,13 @@ ViewProviderSketch::ViewProviderSketch()
                       "Information about the Visual Representation of layers");
 
     ADD_PROPERTY_TYPE(
+        ShowConstruction,
+        (false),
+        "Display Options",
+        (App::PropertyType)(App::Prop_None),
+        "If true, construction geometry is also displayed when the sketch is visible in the 3D view.");
+
+    ADD_PROPERTY_TYPE(
         AutoColor,
         (true),
         "Object Style",
@@ -699,6 +718,70 @@ ViewProviderSketch::ViewProviderSketch()
     updateColorPropertiesVisibility();
 
     pcSketchFacesToggle->addChild(pcSketchFaces);
+
+    auto* constructionDrawStyle = new SoDrawStyle;
+    constructionDrawStyle->linePattern = 0x7E7E;
+    pcConstructionToggle->on = false;
+    pcConstructionToggle->addChild(constructionDrawStyle);
+    pcConstructionToggle->addChild(pcConstructionColor);
+    pcConstructionToggle->addChild(pcConstructionCoords);
+    pcConstructionToggle->addChild(pcConstructionLines);
+}
+
+void ViewProviderSketch::updateConstructionGeometry(bool editing)
+{
+    std::vector<SbVec3f> points;
+    std::vector<int32_t> counts;
+
+    auto* sketch = getSketchObject();
+    if (ShowConstruction.getValue() && !editing && sketch) {
+        std::vector<TopoDS_Edge> edges;
+        Bnd_Box bounds;
+        for (const auto* geo : sketch->getInternalGeometry()) {
+            if (!geo || !GeometryFacade::getConstruction(geo) || geo->isDerivedFrom<Part::GeomPoint>()) {
+                continue;
+            }
+            TopoDS_Shape shape = geo->toShape();
+            if (shape.IsNull() || shape.ShapeType() != TopAbs_EDGE) {
+                continue;
+            }
+            BRepBndLib::Add(shape, bounds);
+            edges.push_back(TopoDS::Edge(shape));
+        }
+
+        // Same tessellation settings as the regular shape rendering (Part preferences
+        // MeshDeviation / MeshAngularDeflection, as held by the Deviation and AngularDeflection
+        // properties), so curves look the same as in the rest of the 3D view.
+        double deviation = Precision::Confusion();
+        if (!bounds.IsVoid()) {
+            deviation = std::max(Part::Tools::getDeflection(bounds, Deviation.getValue()), deviation);
+        }
+        const double angular = Base::toRadians(AngularDeflection.getValue());
+
+        for (const auto& edge : edges) {
+            BRepAdaptor_Curve curve(edge);
+            GCPnts_TangentialDeflection discretizer(curve, angular, deviation);
+            const int nbPoints = discretizer.NbPoints();
+            if (nbPoints < 2) {
+                continue;
+            }
+            for (int i = 1; i <= nbPoints; ++i) {
+                gp_Pnt p = discretizer.Value(i);
+                points.emplace_back(float(p.X()), float(p.Y()), float(p.Z()));
+            }
+            counts.push_back(nbPoints);
+        }
+    }
+
+    pcConstructionCoords->point.setValues(0, int(points.size()), points.data());
+    pcConstructionCoords->point.setNum(int(points.size()));
+    pcConstructionLines->numVertices.setValues(0, int(counts.size()), counts.data());
+    pcConstructionLines->numVertices.setNum(int(counts.size()));
+
+    pcConstructionColor->rgb.setValue(Base::convertTo<SbColor>(LineColor.getValue()));
+    // In edit mode construction geometry is drawn by the EditModeCoinManager
+    pcConstructionToggle->on =
+        ShowConstruction.getValue() && Visibility.getValue() && !editing && !points.empty();
 }
 
 ViewProviderSketch::~ViewProviderSketch()
@@ -3878,6 +3961,10 @@ void ViewProviderSketch::updateData(const App::Property* prop) {
                 AngularDeflection.getValue());
     }
 
+    if (prop == &getSketchObject()->Geometry || prop == &getSketchObject()->InternalShape) {
+        updateConstructionGeometry(isInEditMode());
+    }
+
     if (prop != &getSketchObject()->Constraints) {
         signalElementsChanged();
     }
@@ -3954,7 +4041,13 @@ void ViewProviderSketch::onChanged(const App::Property* prop)
 
     if (prop == &Visibility) {
         pcSketchFacesToggle->on = Visibility.getValue();
+        updateConstructionGeometry(isInEditMode());
         return;
+    }
+
+    if (prop == &ShowConstruction || prop == &LineColor || prop == &Deviation
+        || prop == &AngularDeflection) {
+        updateConstructionGeometry(isInEditMode());
     }
 
     if (prop == &ShapeAppearance) {
@@ -4146,6 +4239,7 @@ void ViewProviderSketch::attach(App::DocumentObject* pcFeat)
     ViewProvider2DObject::attach(pcFeat);
 
     getOrCreateAnnotation()->addChild(pcSketchFacesToggle);
+    getOrCreateAnnotation()->addChild(pcConstructionToggle);
 }
 
 void ViewProviderSketch::setupContextMenu(QMenu* menu, QObject* receiver, const char* member)
@@ -4345,6 +4439,8 @@ bool ViewProviderSketch::setEdit(int ModNum)
     }
 
     setupActiveAndInEdit();
+
+    updateConstructionGeometry(true);
 
     return true;
 }
@@ -4570,6 +4666,8 @@ void ViewProviderSketch::unsetEdit(int ModNum)
     connectConstraintAdded.disconnect();
 
     unsetupActiveAndInEdit();
+
+    updateConstructionGeometry(false);
 
     // visibility automation
     try {

@@ -27,6 +27,9 @@
 #include <boost/smart_ptr/scoped_ptr.hpp>
 
 #include <Inventor/SoRenderManager.h>
+#include <Inventor/nodes/SoBaseColor.h>
+#include <Inventor/nodes/SoCoordinate3.h>
+#include <Inventor/nodes/SoLineSet.h>
 #include <Inventor/lists/SoPickedPointList.h>
 #include <Inventor/sensors/SoNodeSensor.h>
 #include <QCoreApplication>
@@ -543,6 +546,7 @@ public:
     App::PropertyBool ForceOrtho;
     App::PropertyBool SectionView;
     App::PropertyBool AutoColor;
+    App::PropertyBool ShowConstruction;
     App::PropertyString EditingWorkbench;
     SketcherGui::PropertyVisualLayerList VisualLayerList;
     //@}
@@ -1070,6 +1074,14 @@ private:
 
     Gui::CoinPtr<SoSketchFaces> pcSketchFaces;
     Gui::CoinPtr<SoToggleSwitch> pcSketchFacesToggle;
+
+    /// Visual-only rendering of construction geometry outside of edit mode
+    Gui::CoinPtr<SoToggleSwitch> pcConstructionToggle;
+    Gui::CoinPtr<SoBaseColor> pcConstructionColor;
+    Gui::CoinPtr<SoCoordinate3> pcConstructionCoords;
+    Gui::CoinPtr<SoLineSet> pcConstructionLines;
+
+    void updateConstructionGeometry(bool editing);
 
     std::unique_ptr<ShortcutListener> listener;
 
